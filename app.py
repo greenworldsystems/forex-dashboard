@@ -5,17 +5,16 @@ import streamlit as st
 
 API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
 symbol, target = "EUR", "USD"
-interval = "5min"  # options: 1min, 5min, 15min, 30min, 60min
 
 @st.cache_data
-def fetch_intraday_data():
+def fetch_daily_data():
     url = (
         f"https://www.alphavantage.co/query"
-        f"?function=FX_INTRADAY&from_symbol={symbol}&to_symbol={target}"
-        f"&interval={interval}&outputsize=compact&apikey={API_KEY}"
+        f"?function=FX_DAILY&from_symbol={symbol}&to_symbol={target}"
+        f"&outputsize=compact&apikey={API_KEY}"
     )
     r = requests.get(url)
-    data = r.json().get(f"Time Series FX ({interval})", {})
+    data = r.json().get("Time Series FX (Daily)", {})
     if not data:
         st.warning("⚠️ No data returned. Check API key / usage limits.")
         return pd.DataFrame()
@@ -25,12 +24,12 @@ def fetch_intraday_data():
     df.rename(columns={"4. close": "close"}, inplace=True)
     return df
 
-st.title("📈 Forex Dashboard: EUR/USD (Intraday)")
+st.title("📈 Forex Dashboard: EUR/USD (Daily) with SMA & RSI")
 
 if API_KEY:
-    df = fetch_intraday_data()
+    df = fetch_daily_data()
     if not df.empty:
-        # Add indicators
+        # Indicators
         df["SMA_fast"] = df["close"].rolling(5).mean()
         df["SMA_slow"] = df["close"].rolling(20).mean()
         delta = df["close"].diff()
@@ -39,7 +38,7 @@ if API_KEY:
         RS = gain / loss
         df["RSI"] = 100 - (100 / (1 + RS))
 
-        # Plot
+        # Charts
         st.subheader("Price + SMA")
         st.line_chart(df[["close", "SMA_fast", "SMA_slow"]])
 
@@ -52,4 +51,3 @@ if API_KEY:
         st.warning("No data to display.")
 else:
     st.warning("⚠️ Please set ALPHAVANTAGE_API_KEY as env var or Streamlit secret.")
-
