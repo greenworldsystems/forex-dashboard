@@ -58,5 +58,63 @@ def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
     df["RSI"] = 100 - (100 / (1 + RS))
     df["signal"] = 0
     df.loc[(df["SMA_fast"] > df["SMA_slow"]) & (df["SMA_fast"].shift(1) <= df["SMA_slow"].shift(1)), "signal"] = 1
-    df.loc[(df["SMA_fast"] < df["S]()_]()]()
+    df.loc[(df["SMA_fast"] < df["SMA_slow"]) & (df["SMA_fast"].shift(1) >= df["SMA_slow"].shift(1)), "signal"] = -1
+    return df
+
+st.title("📈 Forex Dashboard: 15-min Intraday with Alpha Vantage Daily Fallback")
+
+if not (TWELVE_API_KEY and ALPHAVANTAGE_API_KEY):
+    st.warning("⚠️ Please set both TWELVE_API_KEY and ALPHAVANTAGE_API_KEY in secrets or env variables.")
+else:
+    df = fetch_twelve_data()
+    source_used = "Twelve Data (15min Intraday)"
+    if df.empty:
+        st.info("No intraday data from Twelve Data, falling back to Alpha Vantage daily.")
+        df = fetch_alpha_daily_data()
+        source_used = "Alpha Vantage Daily"
+
+    if df.empty:
+        st.error("No data available from either source.")
+    else:
+        # Sidebar sliders
+        sma_fast_period = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
+        sma_slow_period = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
+        rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
+
+        df = compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period)
+
+        st.subheader(f"Data Source: {source_used}")
+
+        # Debug info
+        st.write("📊 Data snapshot:")
+        st.write(df.tail(10))
+        st.write(f"✅ Buy signals: {len(df[df['signal'] == 1])} | 🚫 Sell signals: {len(df[df['signal'] == -1])}")
+
+        # Streamlit native line chart preview
+        st.subheader("Quick Price + SMA preview (Streamlit chart)")
+        st.line_chart(df[["close", "SMA_fast", "SMA_slow"]].dropna())
+
+        # Matplotlib chart with buy/sell markers
+        st.subheader("Detailed Price + SMA with Buy/Sell Signals (Matplotlib)")
+        plt.figure(figsize=(10,5))
+        plt.plot(df.index, df["close"].dropna(), label="Close")
+        plt.plot(df.index, df["SMA_fast"].dropna(), label=f"SMA {sma_fast_period}")
+        plt.plot(df.index, df["SMA_slow"].dropna(), label=f"SMA {sma_slow_period}")
+
+        buys = df[df["signal"] == 1]
+        sells = df[df["signal"] == -1]
+        plt.scatter(buys.index, buys["close"], marker="^", color="green", label="Buy Signal", s=100)
+        plt.scatter(sells.index, sells["close"], marker="v", color="red", label="Sell Signal", s=100)
+
+        plt.legend()
+        plt.xlabel("Time")
+        plt.ylabel("Price")
+        plt.title(f"{symbol} Close Price and SMA Signals")
+        plt.grid(True)
+        plt.tight_layout()
+
+        st.pyplot(plt)
+
+        st.subheader("RSI")
+        st.line_chart(df["RSI"].dropna())
     
