@@ -24,30 +24,64 @@ def fetch_daily_data():
     df.rename(columns={"4. close": "close"}, inplace=True)
     return df
 
-st.title("📈 Forex Dashboard: EUR/USD (Daily) with SMA & RSI")
+def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
+    df = df.copy()
+    df["SMA_fast"] = df["close"].rolling(sma_fast_period).mean()
+    df["SMA_slow"] = df["close"].rolling(sma_slow_period).mean()
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
+    RS = gain / loss
+    df["RSI"] = 100 - (100 / (1 + RS))
+    return df
+
+def backtest_sma_crossover(df):
+    df = df.copy()
+    df["position"] = 0
+    df.loc[df["SMA_fast"] > df["SMA_slow"], "position"] = 1  # long
+    df.loc[df["SMA_fast"] < df["SMA_slow"], "position"] = 0  # flat
+
+    df["returns"] = df["close"].pct_change()
+    df["strategy_returns"] = df["position"].shift(1) * df["returns"]
+
+    df["equity_curve"] = (1 + df["strategy_returns"].fillna(0)).cumprod()
+
+    total_return = df["equity_curve"].iloc[-1] - 1
+    max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
+
+    return df, total_return, max_drawdown
+
+st.title("📈 Forex Dashboard: EUR/USD with SMA, RSI & Backtest")
 
 if API_KEY:
     df = fetch_daily_data()
     if not df.empty:
-        # Indicators
-        df["SMA_fast"] = df["close"].rolling(5).mean()
-        df["SMA_slow"] = df["close"].rolling(20).mean()
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        RS = gain / loss
-        df["RSI"] = 100 - (100 / (1 + RS))
+        # Sidebar sliders
+        sma_fast_period = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
+        sma_slow_period = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
+        rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
 
-        # Charts
+        df = compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period)
+
         st.subheader("Price + SMA")
         st.line_chart(df[["close", "SMA_fast", "SMA_slow"]])
 
         st.subheader("RSI")
         st.line_chart(df["RSI"])
 
-        st.subheader("Latest data")
+        # Backtest
+        df_bt, total_ret, max_dd = backtest_sma_crossover(df)
+
+        st.subheader("Backtest Equity Curve")
+        st.line_chart(df_bt["equity_curve"])
+
+        st.markdown(f"**Total Return:** {total_ret:.2%}")
+        st.markdown(f"**Max Drawdown:** {max_dd:.2%}")
+
+        st.subheader("Latest Data")
         st.dataframe(df.tail(10))
     else:
         st.warning("No data to display.")
 else:
     st.warning("⚠️ Please set ALPHAVANTAGE_API_KEY as env var or Streamlit secret.")
+    
