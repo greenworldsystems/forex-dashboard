@@ -4,3 +4,5 @@ requests
 matplotlib
 plotly
 scikit-learn
+requests
+websocket-client
