@@ -80,8 +80,10 @@ def train_models(df, rf_n_estimators, rf_max_depth):
     acc_rf = accuracy_score(y_test, preds_rf)
     cm_rf = confusion_matrix(y_test, preds_rf)
 
+    probs = rf.predict_proba(X_test)[:, 1]
     df.loc[df.index[split_idx:], "pred_lr"] = preds_lr
     df.loc[df.index[split_idx:], "pred_rf"] = preds_rf
+    df.loc[df.index[split_idx:], "pred_prob_rf"] = probs
 
     return logreg, rf, acc_lr, cm_lr, acc_rf, cm_rf, df
 
@@ -94,7 +96,7 @@ def backtest_strategy(df, pred_column):
     max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
     return df, total_return, max_drawdown
 
-def simulate_trading(df, pred_column, initial_balance=10000, stop_loss_pct=0.002, take_profit_pct=0.003):
+def simulate_trading(df, pred_column, initial_balance=10000, stop_loss_pct=0.002, take_profit_pct=0.003, risk_per_trade=0.01):
     df = df.copy()
     balance = initial_balance
     position = 0
@@ -110,8 +112,11 @@ def simulate_trading(df, pred_column, initial_balance=10000, stop_loss_pct=0.002
             entry_price = price
         elif position == 1:
             change = (price - entry_price) / entry_price
+            # Position size calculated by risk per trade and stop loss distance
+            position_size = balance * risk_per_trade / stop_loss_pct if stop_loss_pct > 0 else 1
+
             if change <= -stop_loss_pct or change >= take_profit_pct or pred == 0:
-                pnl = price - entry_price
+                pnl = position_size * (price - entry_price)
                 balance += pnl
                 trades.append({"entry": entry_price, "exit": price, "pnl": pnl})
                 position = 0
@@ -140,12 +145,16 @@ else:
     rf_max_depth = st.sidebar.slider("RF Max Depth", 2, 20, 5)
     stop_loss = st.sidebar.number_input("Stop-Loss %", 0.1, 5.0, 0.2) / 100
     take_profit = st.sidebar.number_input("Take-Profit %", 0.1, 5.0, 0.3) / 100
+    risk_per_trade = st.sidebar.slider("Risk % per Trade", 0.1, 5.0, 1.0) / 100
+    confidence_threshold = st.sidebar.slider("ML Confidence Threshold", 0.5, 1.0, 0.7)
 
-    df = fetch_twelve_data(currency_pair)
+    # Convert currency pair to Twelve Data format (e.g. EUR/USD → EURUSD)
+    pair_twelve = currency_pair.replace("/", "")
+
+    df = fetch_twelve_data(pair_twelve)
     source_used = f"Twelve Data (15min Intraday) for {currency_pair}"
 
     if df.empty:
-        # fallback to Alpha Vantage Daily
         from_sym, to_sym = currency_pair.split("/")
         df = fetch_alpha_daily_data(from_sym, to_sym)
         source_used = f"Alpha Vantage Daily for {currency_pair}"
@@ -155,7 +164,12 @@ else:
     else:
         df = compute_indicators(df, sma_fast, sma_slow, rsi_period)
         df_ml = prepare_ml_features(df)
+
+        # Train models and get predictions with probabilities
         logreg, rf, acc_lr, cm_lr, acc_rf, cm_rf, df_ml = train_models(df_ml, rf_n_estimators, rf_max_depth)
+
+        # Filter predictions by confidence threshold
+        df_ml["pred_rf_filtered"] = (df_ml["pred_prob_rf"] > confidence_threshold).astype(int)
 
         st.subheader(f"Data Source: {source_used}")
         st.write(f"Logistic Regression Accuracy: {acc_lr:.2%}")
@@ -165,24 +179,40 @@ else:
         importance = pd.Series(rf.feature_importances_, index=["return_1", "sma_diff", "volatility", "RSI"])
         st.bar_chart(importance)
 
-        df_bt, total_ret, max_dd = backtest_strategy(df_ml, "pred_rf")
+        df_bt, total_ret, max_dd = backtest_strategy(df_ml, "pred_rf_filtered")
         st.subheader("📊 Backtest Equity Curve")
         st.line_chart(df_bt["equity_curve"])
         st.write(f"Total Return: {total_ret:.2%} | Max Drawdown: {max_dd:.2%}")
 
-        final_balance, total_profit, num_trades, win_rate, trades_df = simulate_trading(df_ml, "pred_rf", stop_loss_pct=stop_loss, take_profit_pct=take_profit)
-        st.subheader("🧪 Trading Simulator with SL/TP")
+        final_balance, total_profit, num_trades, win_rate, trades_df = simulate_trading(
+            df_ml,
+            "pred_rf_filtered",
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
+            risk_per_trade=risk_per_trade,
+        )
+
+        st.subheader("🧪 Trading Simulator with SL/TP and Position Sizing")
         st.write(f"Final Balance: ${final_balance:.2f} | Total Profit: ${total_profit:.2f} | Trades: {num_trades} | Win Rate: {win_rate:.2%}")
 
+        st.subheader("Trade Log")
         st.dataframe(trades_df)
+
+        st.subheader("Trade Profit/Loss Distribution")
+        if not trades_df.empty:
+            st.bar_chart(trades_df["pnl"])
+            st.write("Average Winning Trade:", trades_df[trades_df["pnl"] > 0]["pnl"].mean())
+            st.write("Average Losing Trade:", trades_df[trades_df["pnl"] <= 0]["pnl"].mean())
+        else:
+            st.write("No trades executed yet.")
 
         st.subheader("📈 Price + SMA + Buy/Sell")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["close"], mode='lines', name='Close'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_fast"], mode='lines', name='SMA Fast'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_slow"], mode='lines', name='SMA Slow'))
-        buys = df_ml[df_ml["pred_rf"] == 1]
-        sells = df_ml[df_ml["pred_rf"] == 0]
+        buys = df_ml[df_ml["pred_rf_filtered"] == 1]
+        sells = df_ml[df_ml["pred_rf_filtered"] == 0]
         fig.add_trace(go.Scatter(x=buys.index, y=buys["close"], mode='markers', name='Buy', marker=dict(color='green', size=8)))
         fig.add_trace(go.Scatter(x=sells.index, y=sells["close"], mode='markers', name='Sell', marker=dict(color='red', size=8)))
         fig.update_layout(height=500)
@@ -190,4 +220,4 @@ else:
 
         st.subheader("📉 RSI")
         st.line_chart(df["RSI"].dropna())
-            
+    
