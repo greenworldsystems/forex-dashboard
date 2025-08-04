@@ -2,7 +2,7 @@ import os
 import requests
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 # Get API keys from env or Streamlit secrets
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY") or st.secrets.get("TWELVE_API_KEY")
@@ -94,28 +94,56 @@ else:
         st.subheader("Quick Price + SMA preview (Streamlit)")
         st.line_chart(df[["close", "SMA_fast", "SMA_slow"]].dropna())
 
-        # Matplotlib detailed chart with signals
-        st.subheader("Detailed Price + SMA with Buy/Sell Signals (Matplotlib)")
+        # Plotly detailed interactive chart
+        st.subheader("Detailed Price + SMA with Buy/Sell Signals (Plotly)")
 
         plot_df = df.dropna(subset=["close", "SMA_fast", "SMA_slow"])
-        plt.figure(figsize=(10,5))
-        plt.plot(plot_df.index, plot_df["close"], label="Close")
-        plt.plot(plot_df.index, plot_df["SMA_fast"], label=f"SMA {sma_fast_period}")
-        plt.plot(plot_df.index, plot_df["SMA_slow"], label=f"SMA {sma_slow_period}")
 
+        fig = go.Figure()
+
+        # Close price line
+        fig.add_trace(go.Scatter(
+            x=plot_df.index, y=plot_df["close"],
+            mode='lines', name='Close', line=dict(width=2, color='black')
+        ))
+
+        # SMAs
+        fig.add_trace(go.Scatter(
+            x=plot_df.index, y=plot_df["SMA_fast"],
+            mode='lines', name=f'SMA {sma_fast_period}', line=dict(width=2, color='blue')
+        ))
+        fig.add_trace(go.Scatter(
+            x=plot_df.index, y=plot_df["SMA_slow"],
+            mode='lines', name=f'SMA {sma_slow_period}', line=dict(width=2, color='orange')
+        ))
+
+        # Buy signals
         buys = plot_df[plot_df["signal"] == 1]
+        fig.add_trace(go.Scatter(
+            x=buys.index, y=buys["close"],
+            mode='markers', name='Buy Signal',
+            marker=dict(symbol='triangle-up', size=12, color='green')
+        ))
+
+        # Sell signals
         sells = plot_df[plot_df["signal"] == -1]
-        plt.scatter(buys.index, buys["close"], marker="^", color="green", label="Buy Signal", s=100)
-        plt.scatter(sells.index, sells["close"], marker="v", color="red", label="Sell Signal", s=100)
+        fig.add_trace(go.Scatter(
+            x=sells.index, y=sells["close"],
+            mode='markers', name='Sell Signal',
+            marker=dict(symbol='triangle-down', size=12, color='red')
+        ))
 
-        plt.legend()
-        plt.xlabel("Time")
-        plt.ylabel("Price")
-        plt.title(f"{symbol} Close Price and SMA Signals")
-        plt.grid(True)
-        plt.tight_layout()
+        fig.update_layout(
+            title=f"{symbol} Close Price and SMA Signals",
+            xaxis_title="Time",
+            yaxis_title="Price",
+            legend=dict(font=dict(size=12)),
+            hovermode='x unified',
+            height=500,
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
 
-        st.pyplot(plt)
+        st.plotly_chart(fig, use_container_width=True)
 
         # RSI chart
         st.subheader("RSI")
