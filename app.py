@@ -84,7 +84,6 @@ def train_models(df, rf_n_estimators, rf_max_depth):
     acc_rf = accuracy_score(y_test, preds_rf)
     cm_rf = confusion_matrix(y_test, preds_rf)
 
-    # Add predictions to df
     df.loc[df.index[split_idx:], "pred_lr"] = preds_lr
     df.loc[df.index[split_idx:], "pred_rf"] = preds_rf
 
@@ -99,7 +98,35 @@ def backtest_strategy(df, pred_column):
     max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
     return df, total_return, max_drawdown
 
-st.title("📈 Forex Dashboard: SMA, RSI & ML Prediction + Backtest")
+def simulate_trading(df, pred_column, initial_balance=10000):
+    df = df.copy()
+    balance = initial_balance
+    position = 0
+    entry_price = 0
+    trades = []
+
+    for i in range(1, len(df)):
+        pred = df.iloc[i][pred_column]
+        price = df.iloc[i]["close"]
+
+        if pred == 1 and position == 0:
+            position = 1
+            entry_price = price
+        elif pred == 0 and position == 1:
+            pnl = price - entry_price
+            balance += pnl
+            trades.append(pnl)
+            position = 0
+
+    final_balance = balance
+    num_trades = len(trades)
+    win_trades = sum(1 for t in trades if t > 0)
+    win_rate = win_trades / num_trades if num_trades > 0 else 0
+    total_profit = final_balance - initial_balance
+
+    return final_balance, total_profit, num_trades, win_rate
+
+st.title("📈 Forex Dashboard: SMA, RSI & ML + Backtest + Simulator")
 
 if not (TWELVE_API_KEY and ALPHAVANTAGE_API_KEY):
     st.warning("⚠️ Please set TWELVE_API_KEY and ALPHAVANTAGE_API_KEY in secrets or env variables.")
@@ -124,42 +151,39 @@ else:
         logreg, rf, acc_lr, cm_lr, acc_rf, cm_rf, df_ml = train_models(df_ml, rf_n_estimators, rf_max_depth)
 
         st.subheader(f"Data Source: {source_used}")
-
-        st.subheader("✅ ML Model Accuracy")
+        st.subheader("✅ ML Accuracy")
         st.write(f"Logistic Regression Accuracy: {acc_lr:.2%}")
-        st.write("Confusion Matrix (LR):")
-        st.write(cm_lr)
         st.write(f"Random Forest Accuracy: {acc_rf:.2%}")
-        st.write("Confusion Matrix (RF):")
-        st.write(cm_rf)
 
-        # Feature importance
         st.subheader("🌿 Random Forest Feature Importance")
         importance = pd.Series(rf.feature_importances_, index=["return_1", "sma_diff", "volatility", "RSI"])
         st.bar_chart(importance)
 
-        # Backtest
         df_bt, total_ret, max_dd = backtest_strategy(df_ml, "pred_rf")
-        st.subheader("📊 Backtest Equity Curve (Random Forest)")
+        st.subheader("📊 Backtest Equity Curve")
         st.line_chart(df_bt["equity_curve"])
-        st.write(f"Total Return: {total_ret:.2%}")
-        st.write(f"Max Drawdown: {max_dd:.2%}")
+        st.write(f"Total Return: {total_ret:.2%} | Max Drawdown: {max_dd:.2%}")
 
-        # Plot price & predictions
-        st.subheader("📈 Price + SMA + ML Buy/Sell Predictions (RF)")
+        # 📦 Trading simulator
+        final_balance, total_profit, num_trades, win_rate = simulate_trading(df_ml, "pred_rf")
+        st.subheader("🧪 Trading Simulator (Random Forest)")
+        st.write(f"Final Balance: ${final_balance:.2f}")
+        st.write(f"Total Profit: ${total_profit:.2f}")
+        st.write(f"Number of Trades: {num_trades}")
+        st.write(f"Win Rate: {win_rate:.2%}")
+
+        st.subheader("📈 Price + SMA + ML Buy/Sell Predictions")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["close"], mode='lines', name='Close'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_fast"], mode='lines', name='SMA Fast'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_slow"], mode='lines', name='SMA Slow'))
-
         buys = df_ml[df_ml["pred_rf"] == 1]
         sells = df_ml[df_ml["pred_rf"] == 0]
-        fig.add_trace(go.Scatter(x=buys.index, y=buys["close"], mode='markers', name='RF Buy', marker=dict(color='green', size=8, symbol='triangle-up')))
-        fig.add_trace(go.Scatter(x=sells.index, y=sells["close"], mode='markers', name='RF Sell', marker=dict(color='red', size=8, symbol='triangle-down')))
-
+        fig.add_trace(go.Scatter(x=buys.index, y=buys["close"], mode='markers', name='RF Buy', marker=dict(color='green', size=8)))
+        fig.add_trace(go.Scatter(x=sells.index, y=sells["close"], mode='markers', name='RF Sell', marker=dict(color='red', size=8)))
         fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("📉 RSI")
         st.line_chart(df["RSI"].dropna())
-    
+        
