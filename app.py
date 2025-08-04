@@ -8,7 +8,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 
-# Get API keys
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY") or st.secrets.get("TWELVE_API_KEY")
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
 
@@ -98,7 +97,7 @@ def backtest_strategy(df, pred_column):
     max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
     return df, total_return, max_drawdown
 
-def simulate_trading(df, pred_column, initial_balance=10000):
+def simulate_trading(df, pred_column, initial_balance=10000, stop_loss_pct=0.002, take_profit_pct=0.003):
     df = df.copy()
     balance = initial_balance
     position = 0
@@ -112,24 +111,26 @@ def simulate_trading(df, pred_column, initial_balance=10000):
         if pred == 1 and position == 0:
             position = 1
             entry_price = price
-        elif pred == 0 and position == 1:
-            pnl = price - entry_price
-            balance += pnl
-            trades.append(pnl)
-            position = 0
+        elif position == 1:
+            change = (price - entry_price) / entry_price
+            if change <= -stop_loss_pct or change >= take_profit_pct or pred == 0:
+                pnl = price - entry_price
+                balance += pnl
+                trades.append({"entry": entry_price, "exit": price, "pnl": pnl})
+                position = 0
 
     final_balance = balance
     num_trades = len(trades)
-    win_trades = sum(1 for t in trades if t > 0)
+    win_trades = sum(1 for t in trades if t["pnl"] > 0)
     win_rate = win_trades / num_trades if num_trades > 0 else 0
     total_profit = final_balance - initial_balance
 
-    return final_balance, total_profit, num_trades, win_rate
+    return final_balance, total_profit, num_trades, win_rate, pd.DataFrame(trades)
 
 st.title("📈 Forex Dashboard: SMA, RSI & ML + Backtest + Simulator")
 
 if not (TWELVE_API_KEY and ALPHAVANTAGE_API_KEY):
-    st.warning("⚠️ Please set TWELVE_API_KEY and ALPHAVANTAGE_API_KEY in secrets or env variables.")
+    st.warning("⚠️ Please set TWELVE_API_KEY and ALPHAVANTAGE_API_KEY.")
 else:
     df = fetch_twelve_data()
     source_used = "Twelve Data (15min Intraday)"
@@ -138,24 +139,25 @@ else:
         source_used = "Alpha Vantage Daily"
 
     if df.empty:
-        st.error("No data available from either source.")
+        st.error("No data available.")
     else:
         sma_fast = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
         sma_slow = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
         rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
         rf_n_estimators = st.sidebar.slider("RF Trees", 10, 200, 50)
         rf_max_depth = st.sidebar.slider("RF Max Depth", 2, 20, 5)
+        stop_loss = st.sidebar.number_input("Stop-Loss %", 0.1, 5.0, 0.2) / 100
+        take_profit = st.sidebar.number_input("Take-Profit %", 0.1, 5.0, 0.3) / 100
 
         df = compute_indicators(df, sma_fast, sma_slow, rsi_period)
         df_ml = prepare_ml_features(df)
         logreg, rf, acc_lr, cm_lr, acc_rf, cm_rf, df_ml = train_models(df_ml, rf_n_estimators, rf_max_depth)
 
         st.subheader(f"Data Source: {source_used}")
-        st.subheader("✅ ML Accuracy")
         st.write(f"Logistic Regression Accuracy: {acc_lr:.2%}")
         st.write(f"Random Forest Accuracy: {acc_rf:.2%}")
 
-        st.subheader("🌿 Random Forest Feature Importance")
+        st.subheader("🌿 RF Feature Importance")
         importance = pd.Series(rf.feature_importances_, index=["return_1", "sma_diff", "volatility", "RSI"])
         st.bar_chart(importance)
 
@@ -164,26 +166,23 @@ else:
         st.line_chart(df_bt["equity_curve"])
         st.write(f"Total Return: {total_ret:.2%} | Max Drawdown: {max_dd:.2%}")
 
-        # 📦 Trading simulator
-        final_balance, total_profit, num_trades, win_rate = simulate_trading(df_ml, "pred_rf")
-        st.subheader("🧪 Trading Simulator (Random Forest)")
-        st.write(f"Final Balance: ${final_balance:.2f}")
-        st.write(f"Total Profit: ${total_profit:.2f}")
-        st.write(f"Number of Trades: {num_trades}")
-        st.write(f"Win Rate: {win_rate:.2%}")
+        final_balance, total_profit, num_trades, win_rate, trades_df = simulate_trading(df_ml, "pred_rf", stop_loss_pct=stop_loss, take_profit_pct=take_profit)
+        st.subheader("🧪 Trading Simulator with SL/TP")
+        st.write(f"Final Balance: ${final_balance:.2f} | Total Profit: ${total_profit:.2f} | Trades: {num_trades} | Win Rate: {win_rate:.2%}")
 
-        st.subheader("📈 Price + SMA + ML Buy/Sell Predictions")
+        st.dataframe(trades_df)
+
+        st.subheader("📈 Price + SMA + Buy/Sell")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["close"], mode='lines', name='Close'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_fast"], mode='lines', name='SMA Fast'))
         fig.add_trace(go.Scatter(x=df_ml.index, y=df_ml["SMA_slow"], mode='lines', name='SMA Slow'))
         buys = df_ml[df_ml["pred_rf"] == 1]
         sells = df_ml[df_ml["pred_rf"] == 0]
-        fig.add_trace(go.Scatter(x=buys.index, y=buys["close"], mode='markers', name='RF Buy', marker=dict(color='green', size=8)))
-        fig.add_trace(go.Scatter(x=sells.index, y=sells["close"], mode='markers', name='RF Sell', marker=dict(color='red', size=8)))
+        fig.add_trace(go.Scatter(x=buys.index, y=buys["close"], mode='markers', name='Buy', marker=dict(color='green', size=8)))
+        fig.add_trace(go.Scatter(x=sells.index, y=sells["close"], mode='markers', name='Sell', marker=dict(color='red', size=8)))
         fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("📉 RSI")
         st.line_chart(df["RSI"].dropna())
-        
