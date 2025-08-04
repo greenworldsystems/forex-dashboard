@@ -1,28 +1,22 @@
 import os
 import json
-import time
 import threading
-
 import pandas as pd
 import numpy as np
 import requests
 import streamlit as st
 
-# ML imports
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
-# Plotly for charts
 import plotly.graph_objects as go
-
-# Websocket client
 import websocket
 
-# API keys from Streamlit secrets or env
+# API keys from Streamlit secrets or env vars
 TWELVE_API_KEY = st.secrets.get("TWELVE_API_KEY") or os.getenv("TWELVE_API_KEY")
 ALPHAVANTAGE_API_KEY = st.secrets.get("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHAVANTAGE_API_KEY")
 
-# Globals for WebSocket live feed
+# Global variables for live data and websocket control
 LIVE_DATA = []
 WS_RUNNING = False
 
@@ -32,12 +26,12 @@ if "ws_thread" not in st.session_state:
 if "live_data" not in st.session_state:
     st.session_state.live_data = []
 
-# Parameters and currency pair selector
+# Currency pair selector and formatting
 CURRENCY_PAIRS = ["EUR/USD", "USD/CAD", "GBP/USD", "USD/JPY", "AUD/USD"]
 pair = st.sidebar.selectbox("Select Currency Pair", CURRENCY_PAIRS)
-pair_twelve = pair.replace("/", "")  # e.g. "EURUSD"
+pair_twelve = pair.replace("/", "").upper()  # e.g. EURUSD
 
-# --- Functions for fetching historical data ---
+# --- Fetch historical intraday data from Twelve Data ---
 @st.cache_data(ttl=600)
 def fetch_intraday_twelve(pair_sym):
     url = (
@@ -57,6 +51,7 @@ def fetch_intraday_twelve(pair_sym):
         df[col] = pd.to_numeric(df[col])
     return df
 
+# --- Fetch daily fallback data from Alpha Vantage ---
 @st.cache_data(ttl=600)
 def fetch_daily_alpha():
     url = (
@@ -75,7 +70,7 @@ def fetch_daily_alpha():
     df.rename(columns={"4. close": "close"}, inplace=True)
     return df
 
-# Indicator calculations
+# --- Calculate indicators ---
 def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
     df = df.copy()
     df["SMA_fast"] = df["close"].rolling(sma_fast_period).mean()
@@ -87,7 +82,7 @@ def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
     df["RSI"] = 100 - (100 / (1 + RS))
     return df
 
-# Feature engineering for ML
+# --- Prepare features for ML ---
 def prepare_features(df):
     df = df.copy()
     df["returns"] = df["close"].pct_change()
@@ -95,11 +90,11 @@ def prepare_features(df):
     df.dropna(inplace=True)
     return df
 
-# ML models training
+# --- Train ML models ---
 def train_models(df, feature_cols):
     X = df[feature_cols]
     y = df["direction"]
-    split = int(len(df)*0.7)
+    split = int(len(df) * 0.7)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
 
@@ -111,13 +106,12 @@ def train_models(df, feature_cols):
     rf.fit(X_train, y_train)
     rf_acc = rf.score(X_test, y_test)
 
-    # Predictions for whole dataset (for plotting)
     df["LR_pred"] = lr.predict(X)
     df["RF_pred"] = rf.predict(X)
 
     return lr_acc, rf_acc, df, rf
 
-# Backtest
+# --- Backtest ---
 def backtest_strategy(df):
     df = df.copy()
     df["position"] = df["RF_pred"].shift(1)
@@ -128,16 +122,14 @@ def backtest_strategy(df):
     max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
     return df, total_return, max_drawdown
 
-# --- WebSocket functions for live data ---
-
+# --- WebSocket callbacks ---
 def on_message(ws, message):
     global LIVE_DATA
+    # Debug print incoming message
+    print("Received WS message:", message)
     data = json.loads(message)
-    # Example data structure check for Twelve Data
     if "data" in data and data["data"]:
         tick = data["data"][0] if isinstance(data["data"], list) else data["data"]
-        # tick dict: {'symbol': 'EURUSD', 'price': '1.1555', 'timestamp': '...'}
-        # Convert to suitable dict
         tick_parsed = {
             "datetime": pd.to_datetime(tick.get("datetime", tick.get("timestamp", None))),
             "close": float(tick["close"]) if "close" in tick else float(tick["price"]),
@@ -163,7 +155,7 @@ def on_open(ws):
     subscribe_msg = {
         "action": "subscribe",
         "params": {
-            "symbols": [pair_twelve]  # e.g. "EURUSD"
+            "symbols": [pair_twelve]
         }
     }
     ws.send(json.dumps(subscribe_msg))
@@ -171,19 +163,18 @@ def on_open(ws):
 def start_ws():
     global WS_RUNNING
     WS_RUNNING = True
-    ws_url = "wss://ws.twelvedata.com/v1/quotes/forex"
+    # Pass API key in URL as query param per Twelve Data docs
+    ws_url = f"wss://ws.twelvedata.com/v1/quotes/forex?apikey={TWELVE_API_KEY}"
     ws = websocket.WebSocketApp(
         ws_url,
         on_open=on_open,
         on_message=on_message,
         on_error=on_error,
-        on_close=on_close,
-        header={"Authorization": f"Bearer {TWELVE_API_KEY}"}
+        on_close=on_close
     )
     ws.run_forever()
 
 # --- Streamlit UI ---
-
 st.title("📈 Forex Dashboard: SMA, RSI, ML + Live Feed")
 
 if not TWELVE_API_KEY or not ALPHAVANTAGE_API_KEY:
@@ -204,7 +195,7 @@ if df.empty:
     st.error("No data available from APIs.")
     st.stop()
 
-# Compute indicators
+# Compute indicators and prepare features
 df = compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period)
 df = prepare_features(df)
 
@@ -215,18 +206,24 @@ lr_acc, rf_acc, df, rf_model = train_models(df, feature_cols)
 # Backtest
 df_bt, total_ret, max_dd = backtest_strategy(df)
 
-# Show ML performance & backtest
+# Show ML accuracy and backtest summary
 st.markdown(f"**Logistic Regression Accuracy:** {lr_acc:.2%}")
 st.markdown(f"**Random Forest Accuracy:** {rf_acc:.2%}")
 st.markdown(f"**Backtest Total Return:** {total_ret:.2%}")
 st.markdown(f"**Backtest Max Drawdown:** {max_dd:.2%}")
 
-# Plot price, SMA and ML predictions using Plotly
+# Plot price, SMA and ML signals
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["close"], mode="lines", name="Close"))
 fig.add_trace(go.Scatter(x=df.index, y=df["SMA_fast"], mode="lines", name=f"SMA {sma_fast_period}"))
 fig.add_trace(go.Scatter(x=df.index, y=df["SMA_slow"], mode="lines", name=f"SMA {sma_slow_period}"))
-fig.add_trace(go.Scatter(x=df.index, y=df["RF_pred"]*df["close"].max(), mode="markers", name="RF Buy/Sell Signal", marker=dict(color='green', size=5)))
+fig.add_trace(go.Scatter(
+    x=df.index, 
+    y=df["RF_pred"] * df["close"].max(),
+    mode="markers", 
+    name="RF Buy/Sell Signal",
+    marker=dict(color='green', size=5))
+)
 st.plotly_chart(fig, use_container_width=True)
 
 # RSI plot
@@ -234,7 +231,7 @@ fig_rsi = go.Figure()
 fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], mode="lines", name="RSI"))
 st.plotly_chart(fig_rsi, use_container_width=True)
 
-# --- Live WebSocket controls ---
+# --- Live WebSocket Controls ---
 col1, col2 = st.columns(2)
 with col1:
     start_live = st.button("Start Live Feed")
@@ -259,4 +256,4 @@ if LIVE_DATA:
 else:
     st.write("No live data yet...")
 
-# Note: You should implement live bar aggregation and indicator update in the future here.
+# Reminder: You can build live bar aggregation and live ML updates here in future iterations.
