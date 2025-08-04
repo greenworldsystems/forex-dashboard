@@ -1,69 +1,62 @@
 import os
 import requests
 import pandas as pd
-import numpy as np
 import streamlit as st
-import plotly.graph_objects as go
+import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
+import plotly.graph_objects as go
 
-st.set_page_config(layout="wide", page_title="Forex Dashboard with ML & Live Feed")
+# Get API keys from env vars or Streamlit secrets
+TWELVE_API_KEY = os.getenv("TWELVE_API_KEY") or st.secrets.get("TWELVE_API_KEY")
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
 
-TWELVE_API_KEY = st.secrets.get("TWELVE_API_KEY")
-ALPHAVANTAGE_API_KEY = st.secrets.get("ALPHAVANTAGE_API_KEY")
+st.set_page_config(layout="wide")
+st.title("📈 Forex Dashboard: SMA, RSI, ML + Backtest + Live Feed")
 
-# --- Data Fetching Functions ---
+# Sidebar controls
+pair = st.sidebar.selectbox(
+    "Select currency pair",
+    ["EUR/USD", "USD/CAD", "GBP/USD", "USD/JPY", "AUD/USD"]
+)
 
-@st.cache_data(show_spinner=False)
-def fetch_intraday_twelve(pair):
-    symbol_encoded = pair.replace("/", "%2F")
+sma_fast_period = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
+sma_slow_period = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
+rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
+
+rf_n_estimators = st.sidebar.slider("Random Forest Trees (n_estimators)", 10, 200, 50, step=10)
+rf_max_depth = st.sidebar.slider("Random Forest Max Depth", 2, 20, 5)
+
+# Parse currency symbols for API
+base, quote = pair.split("/")
+
+@st.cache_data
+def fetch_intraday_data(symbol_base, symbol_quote, interval="15min", outputsize="30"):
     url = (
         f"https://api.twelvedata.com/time_series"
-        f"?symbol={symbol_encoded}&interval=15min&outputsize=500&apikey={TWELVE_API_KEY}"
+        f"?symbol={symbol_base}/{symbol_quote}&interval={interval}"
+        f"&outputsize={outputsize}&format=JSON&apikey={TWELVE_API_KEY}"
     )
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        if "values" not in data:
-            st.warning(f"⚠️ No intraday data from Twelve Data. Message: {data.get('message', '')}")
-            return pd.DataFrame()
-        df = pd.DataFrame(data["values"])
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        for col in ["open", "high", "low", "close"]:
-            df[col] = df[col].astype(float)
-        df.set_index("datetime", inplace=True)
-        df.sort_index(inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching Twelve Data intraday: {e}")
+    response = requests.get(url)
+    data = response.json()
+    if "values" not in data:
+        st.warning(f"⚠️ No intraday data returned. Check API key / limits.\nMessage: {data.get('message', 'Unknown error')}")
         return pd.DataFrame()
-
-@st.cache_data(show_spinner=False)
-def fetch_daily_alpha(pair):
-    from_symbol, to_symbol = pair.split("/")
-    url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=FX_DAILY&from_symbol={from_symbol}&to_symbol={to_symbol}"
-        f"&outputsize=compact&apikey={ALPHAVANTAGE_API_KEY}"
-    )
-    try:
-        r = requests.get(url)
-        data = r.json().get("Time Series FX (Daily)", {})
-        if not data:
-            st.warning("⚠️ No daily data returned from Alpha Vantage.")
-            return pd.DataFrame()
-        df = pd.DataFrame.from_dict(data, orient="index").astype(float)
-        df.index = pd.to_datetime(df.index)
-        df.sort_index(inplace=True)
-        df.rename(columns={"1. open":"open","2. high":"high","3. low":"low","4. close": "close"}, inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching Alpha Vantage daily: {e}")
-        return pd.DataFrame()
-
-# --- Indicator Computation ---
+    df = pd.DataFrame(data["values"])
+    df = df.rename(columns={
+        "datetime": "date",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close"
+    })
+    df["date"] = pd.to_datetime(df["date"])
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.sort_values("date")
+    df.set_index("date", inplace=True)
+    return df
 
 def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
     df = df.copy()
@@ -76,20 +69,24 @@ def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
     df["RSI"] = 100 - (100 / (1 + RS))
     return df
 
-# --- Feature Engineering for ML ---
-
-def build_features(df):
+def prepare_features(df):
     df = df.copy()
-    df["return"] = df["close"].pct_change()
-    df["target"] = (df["return"].shift(-1) > 0).astype(int)  # next period up/down
-    df["SMA_diff"] = df["SMA_fast"] - df["SMA_slow"]
-    df["RSI"] = df["RSI"].fillna(50)
-    df.dropna(inplace=True)
-    features = df[["SMA_fast", "SMA_slow", "SMA_diff", "RSI"]]
-    target = df["target"]
-    return features, target, df
+    df["SMA_fast"] = df["close"].rolling(sma_fast_period).mean()
+    df["SMA_slow"] = df["close"].rolling(sma_slow_period).mean()
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
+    RS = gain / loss
+    df["RSI"] = 100 - (100 / (1 + RS))
 
-# --- ML Models Training ---
+    # Features and target for ML model
+    df["return"] = df["close"].pct_change().shift(-1)  # next period return
+    df["target"] = (df["return"] > 0).astype(int)  # binary target: 1 if price goes up next period
+
+    features = df[["SMA_fast", "SMA_slow", "RSI"]].dropna()
+    target = df.loc[features.index, "target"]
+
+    return features, target
 
 def train_models(features, target):
     split = int(len(features) * 0.7)
@@ -97,7 +94,11 @@ def train_models(features, target):
     y_train, y_test = target.iloc[:split], target.iloc[split:]
 
     lr = LogisticRegression(max_iter=200)
-    rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+    rf = RandomForestClassifier(
+        n_estimators=rf_n_estimators,
+        max_depth=rf_max_depth,
+        random_state=42
+    )
 
     lr.fit(X_train, y_train)
     rf.fit(X_train, y_train)
@@ -105,188 +106,157 @@ def train_models(features, target):
     y_pred_lr = lr.predict(X_test)
     y_pred_rf = rf.predict(X_test)
 
-    acc_lr = accuracy_score(y_test, y_pred_lr)
-    acc_rf = accuracy_score(y_test, y_pred_rf)
+    lr_acc = accuracy_score(y_test, y_pred_lr)
+    rf_acc = accuracy_score(y_test, y_pred_rf)
 
-    cm_lr = confusion_matrix(y_test, y_pred_lr)
-    cm_rf = confusion_matrix(y_test, y_pred_rf)
+    lr_cm = confusion_matrix(y_test, y_pred_lr)
+    rf_cm = confusion_matrix(y_test, y_pred_rf)
 
-    return (lr, rf, acc_lr, acc_rf, cm_lr, cm_rf, X_test.index, y_pred_lr, y_pred_rf, y_test)
-
-# --- Backtesting SMA Crossover Strategy ---
+    return (lr, rf), (lr_acc, rf_acc), (lr_cm, rf_cm), X_test, y_test, y_pred_lr, y_pred_rf
 
 def backtest_sma_crossover(df):
     df = df.copy()
     df["position"] = 0
     df.loc[df["SMA_fast"] > df["SMA_slow"], "position"] = 1
-    df.loc[df["SMA_fast"] < df["SMA_slow"], "position"] = 0
+    df.loc[df["SMA_fast"] <= df["SMA_slow"], "position"] = 0
 
     df["returns"] = df["close"].pct_change()
     df["strategy_returns"] = df["position"].shift(1) * df["returns"]
-    df["equity_curve"] = (1 + df["strategy_returns"].fillna(0)).cumprod()
 
+    df["equity_curve"] = (1 + df["strategy_returns"].fillna(0)).cumprod()
     total_return = df["equity_curve"].iloc[-1] - 1
     max_drawdown = ((df["equity_curve"].cummax() - df["equity_curve"]) / df["equity_curve"].cummax()).max()
+
     return df, total_return, max_drawdown
 
-# --- Trading Simulator with SL & TP ---
-
-def run_trading_simulator(df, signals, stop_loss=0.005, take_profit=0.01, initial_balance=10000):
+def trading_simulator(df, predictions, initial_balance=10000, stop_loss=0.01, take_profit=0.02):
     balance = initial_balance
-    position = 0  # 1=long, 0=flat
+    position = 0  # 1 for long, 0 for flat
     entry_price = 0
     trades = []
     wins = 0
 
     for i in range(1, len(df)):
+        pred = predictions[i-1]
         price = df["close"].iloc[i]
-        signal = signals.iloc[i]
+        prev_price = df["close"].iloc[i-1]
 
-        if position == 0 and signal == 1:  # enter long
+        # Enter trade
+        if position == 0 and pred == 1:
             position = 1
             entry_price = price
-            trades.append({"entry_index": i, "entry_price": price, "exit_price": None, "profit": None})
+            trades.append({"entry_index": i, "entry_price": price, "exit_index": None, "exit_price": None, "profit": None})
+
         elif position == 1:
             change = (price - entry_price) / entry_price
-            # Check stop loss or take profit
-            if change <= -stop_loss or change >= take_profit or signal == 0:
-                position = 0
-                exit_price = price
-                profit = exit_price - entry_price
-                trades[-1]["exit_price"] = exit_price
-                trades[-1]["profit"] = profit
-                balance += profit * (balance / entry_price)  # simulate position size proportional to balance
+
+            # Check stop loss / take profit
+            if change <= -stop_loss or change >= take_profit or pred == 0:
+                profit = (price - entry_price)
+                balance += profit * 1000  # assume trading 1000 units
+                trades[-1]["exit_index"] = i
+                trades[-1]["exit_price"] = price
+                trades[-1]["profit"] = profit * 1000
                 if profit > 0:
                     wins += 1
+                position = 0
 
+    win_rate = wins / len(trades) if trades else 0
     total_profit = balance - initial_balance
-    win_rate = (wins / len(trades) * 100) if trades else 0
     return balance, total_profit, len(trades), win_rate, trades
 
-# --- Plotting Functions with Plotly ---
-
-def plot_price_sma_rsi(df, signals, pair, sma_fast_period, sma_slow_period):
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(x=df.index, y=df["close"], mode="lines", name="Close Price"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA_fast"], mode="lines", name=f"SMA {sma_fast_period}"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["SMA_slow"], mode="lines", name=f"SMA {sma_slow_period}"))
-
-    buy_signals = df[signals == 1]
-    sell_signals = df[signals == 0]
-
-    fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals["close"], mode="markers",
-                             marker=dict(symbol="triangle-up", color="green", size=10),
-                             name="Buy Signals"))
-
-    fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals["close"], mode="markers",
-                             marker=dict(symbol="triangle-down", color="red", size=10),
-                             name="Sell Signals"))
-
-    fig.update_layout(title=f"{pair} Price with SMA & Buy/Sell Signals", xaxis_title="Date", yaxis_title="Price",
-                      hovermode="x unified")
-    st.plotly_chart(fig, use_container_width=True)
-
-def plot_rsi(df):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], mode="lines", name="RSI"))
-    fig.update_layout(title="RSI", xaxis_title="Date", yaxis_title="RSI", yaxis=dict(range=[0, 100]))
-    st.plotly_chart(fig, use_container_width=True)
-
-def plot_feature_importance(rf, features):
-    importances = rf.feature_importances_
-    fig = go.Figure(go.Bar(x=features, y=importances))
-    fig.update_layout(title="Random Forest Feature Importance", xaxis_title="Feature", yaxis_title="Importance")
-    st.plotly_chart(fig, use_container_width=True)
-
-def plot_confusion_matrix(cm, title):
-    import plotly.figure_factory as ff
-    z = cm
-    x = ["Pred 0", "Pred 1"]
-    y = ["True 0", "True 1"]
-    fig = ff.create_annotated_heatmap(z, x=x, y=y, colorscale="Viridis")
-    fig.update_layout(title_text=title, width=400, height=400)
-    st.plotly_chart(fig)
-
-# --- Main App ---
-
-st.title("📈 Forex Dashboard: SMA, RSI, ML + Backtest + Live Feed")
-
-pair = st.sidebar.selectbox("Select currency pair", ["EUR/USD", "USD/CAD", "GBP/USD", "USD/JPY", "AUD/USD"])
-
-sma_fast_period = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
-sma_slow_period = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
-rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
-
 # Fetch data
-df = fetch_intraday_twelve(pair)
-using_intraday = True
+df = fetch_intraday_data(base, quote)
 if df.empty:
-    st.warning("⚠️ Twelve Data intraday unavailable, falling back to Alpha Vantage daily data.")
-    df = fetch_daily_alpha(pair)
-    using_intraday = False
-
-if df.empty:
-    st.error("No data available. Please check API keys and limits.")
+    st.warning("No intraday data to display.")
     st.stop()
 
 # Compute indicators
 df = compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period)
 
-# ML features and target
-features, target, df = build_features(df)
+# Prepare features and target
+features, target = prepare_features(df)
 
-# Train ML models
-lr, rf, acc_lr, acc_rf, cm_lr, cm_rf, test_index, y_pred_lr, y_pred_rf, y_test = train_models(features, target)
+# Train models
+(models_lr_rf, (lr_acc, rf_acc), (lr_cm, rf_cm), X_test, y_test, y_pred_lr, y_pred_rf) = train_models(features, target)
 
 # Backtest SMA crossover
-df_bt, total_ret, max_dd = backtest_sma_crossover(df)
+df_bt, total_return, max_drawdown = backtest_sma_crossover(df)
 
-# Simulator with RF predictions as signals
-df_test = df.loc[test_index]
-signals = pd.Series(y_pred_rf, index=test_index)
-balance, total_profit, trades_count, win_rate, trades = run_trading_simulator(df_test, signals)
+# Trading simulator using RF predictions
+balance, total_profit, trades_count, win_rate, trades_log = trading_simulator(df.loc[X_test.index], y_pred_rf)
 
 # Display metrics
-st.markdown(f"### Data Source: {'Twelve Data (15min Intraday)' if using_intraday else 'Alpha Vantage (Daily Fallback)'}")
-st.markdown(f"#### Logistic Regression Accuracy: {acc_lr*100:.2f}%")
-st.markdown(f"#### Random Forest Accuracy: {acc_rf*100:.2f}%")
-st.markdown("#### Confusion Matrix (Logistic Regression):")
-plot_confusion_matrix(cm_lr, "Logistic Regression Confusion Matrix")
-st.markdown("#### Confusion Matrix (Random Forest):")
-plot_confusion_matrix(cm_rf, "Random Forest Confusion Matrix")
+st.markdown(f"**Data Source:** Twelve Data (15min Intraday) for {pair}")
+st.markdown(f"Logistic Regression Accuracy: {lr_acc:.2%}")
+st.markdown(f"Random Forest Accuracy: {rf_acc:.2%}")
 
-st.markdown("### 🌿 Random Forest Feature Importance")
-plot_feature_importance(rf, features.columns)
+st.subheader("Confusion Matrix (Logistic Regression):")
+st.write(lr_cm)
 
-st.markdown("### 📊 Backtest Equity Curve (SMA Crossover)")
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(x=df_bt.index, y=df_bt["equity_curve"], mode="lines", name="Equity Curve"))
-st.plotly_chart(fig_eq, use_container_width=True)
-st.markdown(f"**Total Return:** {total_ret:.2%}")
-st.markdown(f"**Max Drawdown:** {max_dd:.2%}")
+st.subheader("Confusion Matrix (Random Forest):")
+st.write(rf_cm)
 
-st.markdown("### 🧪 Trading Simulator with Stop Loss & Take Profit")
+st.subheader("🌿 Random Forest Feature Importance")
+rf_model = models_lr_rf[1]
+feat_imp = rf_model.feature_importances_
+feat_names = features.columns
+imp_df = pd.DataFrame({"feature": feat_names, "importance": feat_imp}).sort_values(by="importance", ascending=False)
+st.dataframe(imp_df)
+
+st.subheader("📊 Backtest Equity Curve (SMA Crossover)")
+fig_backtest = go.Figure()
+fig_backtest.add_trace(go.Scatter(x=df_bt.index, y=df_bt["equity_curve"], mode="lines", name="Equity Curve"))
+st.plotly_chart(fig_backtest, use_container_width=True)
+st.markdown(f"Total Return: {total_return:.2%}")
+st.markdown(f"Max Drawdown: {max_drawdown:.2%}")
+
+st.subheader("🧪 Trading Simulator with Stop Loss & Take Profit")
 st.markdown(f"Final Balance: ${balance:,.2f}")
 st.markdown(f"Total Profit: ${total_profit:,.2f}")
 st.markdown(f"Number of Trades: {trades_count}")
-st.markdown(f"Win Rate: {win_rate:.2f}%")
+st.markdown(f"Win Rate: {win_rate:.2%}")
 
-st.markdown("### 📈 Price + SMA + Buy/Sell Signals (Random Forest)")
-plot_price_sma_rsi(df_test, signals, pair, sma_fast_period, sma_slow_period)
+st.subheader("📈 Price + SMA + Buy/Sell Signals (Random Forest)")
+fig_price = go.Figure()
+fig_price.add_trace(go.Scatter(x=df.index, y=df["close"], mode="lines", name="Close Price"))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["SMA_fast"], mode="lines", name=f"SMA {sma_fast_period}"))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["SMA_slow"], mode="lines", name=f"SMA {sma_slow_period}"))
 
-st.markdown("### 📉 RSI")
-plot_rsi(df)
+buy_signals = df.loc[(y_pred_rf == 1)]
+sell_signals = df.loc[(y_pred_rf == 0)]
 
-# Placeholder for Live Feed (expandable)
-if using_intraday:
-    st.markdown("### 🔴 Live Feed (placeholder) - coming soon!")
-else:
-    st.info("Live feed disabled with daily data fallback.")
+# Align buy/sell signals with index of df (using X_test.index)
+buy_signals = buy_signals.loc[X_test.index]
+sell_signals = sell_signals.loc[X_test.index]
 
-# Show recent trades log
-if trades_count > 0:
-    trades_df = pd.DataFrame(trades)
-    st.markdown("### 📝 Trades Log")
+fig_price.add_trace(go.Scatter(
+    x=buy_signals.index,
+    y=df.loc[buy_signals.index, "close"],
+    mode="markers",
+    name="Buy Signals",
+    marker=dict(symbol="triangle-up", color="green", size=10)
+))
+fig_price.add_trace(go.Scatter(
+    x=sell_signals.index,
+    y=df.loc[sell_signals.index, "close"],
+    mode="markers",
+    name="Sell Signals",
+    marker=dict(symbol="triangle-down", color="red", size=10)
+))
+st.plotly_chart(fig_price, use_container_width=True)
+
+st.subheader("📉 RSI")
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], mode="lines", name="RSI"))
+st.plotly_chart(fig_rsi, use_container_width=True)
+
+st.subheader("🔴 Live Feed (placeholder) - coming soon!")
+st.write("Live feed integration will be added soon.")
+
+st.subheader("📝 Trades Log")
+if trades_log:
+    trades_df = pd.DataFrame(trades_log)
     st.dataframe(trades_df)
-
+else:
+    st.write("No trades executed yet.")
