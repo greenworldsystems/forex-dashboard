@@ -11,14 +11,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY") or st.secrets.get("TWELVE_API_KEY")
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
 
-symbol = "EUR/USD"
 twelve_interval = "15min"
-alpha_symbol_from = "EUR"
-alpha_symbol_to = "USD"
 
 @st.cache_data(ttl=600)
-def fetch_twelve_data():
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={twelve_interval}&apikey={TWELVE_API_KEY}&format=JSON&outputsize=500"
+def fetch_twelve_data(currency_pair):
+    url = f"https://api.twelvedata.com/time_series?symbol={currency_pair}&interval={twelve_interval}&apikey={TWELVE_API_KEY}&format=JSON&outputsize=500"
     r = requests.get(url)
     data = r.json()
     if "values" not in data:
@@ -31,8 +28,8 @@ def fetch_twelve_data():
     return df
 
 @st.cache_data(ttl=600)
-def fetch_alpha_daily_data():
-    url = f"https://www.alphavantage.co/query?function=FX_DAILY&from_symbol={alpha_symbol_from}&to_symbol={alpha_symbol_to}&outputsize=compact&apikey={ALPHAVANTAGE_API_KEY}"
+def fetch_alpha_daily_data(from_symbol, to_symbol):
+    url = f"https://www.alphavantage.co/query?function=FX_DAILY&from_symbol={from_symbol}&to_symbol={to_symbol}&outputsize=compact&apikey={ALPHAVANTAGE_API_KEY}"
     r = requests.get(url)
     data = r.json().get("Time Series FX (Daily)", {})
     if not data:
@@ -130,25 +127,32 @@ def simulate_trading(df, pred_column, initial_balance=10000, stop_loss_pct=0.002
 st.title("📈 Forex Dashboard: SMA, RSI & ML + Backtest + Simulator")
 
 if not (TWELVE_API_KEY and ALPHAVANTAGE_API_KEY):
-    st.warning("⚠️ Please set TWELVE_API_KEY and ALPHAVANTAGE_API_KEY.")
+    st.warning("⚠️ Please set TWELVE_API_KEY and ALPHAVANTAGE_API_KEY in secrets or env vars.")
 else:
-    df = fetch_twelve_data()
-    source_used = "Twelve Data (15min Intraday)"
-    if df.empty:
-        df = fetch_alpha_daily_data()
-        source_used = "Alpha Vantage Daily"
+    currency_pair = st.sidebar.selectbox(
+        "Currency Pair",
+        ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
+    )
+    sma_fast = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
+    sma_slow = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
+    rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
+    rf_n_estimators = st.sidebar.slider("RF Trees", 10, 200, 50)
+    rf_max_depth = st.sidebar.slider("RF Max Depth", 2, 20, 5)
+    stop_loss = st.sidebar.number_input("Stop-Loss %", 0.1, 5.0, 0.2) / 100
+    take_profit = st.sidebar.number_input("Take-Profit %", 0.1, 5.0, 0.3) / 100
+
+    df = fetch_twelve_data(currency_pair)
+    source_used = f"Twelve Data (15min Intraday) for {currency_pair}"
 
     if df.empty:
-        st.error("No data available.")
+        # fallback to Alpha Vantage Daily
+        from_sym, to_sym = currency_pair.split("/")
+        df = fetch_alpha_daily_data(from_sym, to_sym)
+        source_used = f"Alpha Vantage Daily for {currency_pair}"
+
+    if df.empty:
+        st.error("No data available for selected currency pair.")
     else:
-        sma_fast = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
-        sma_slow = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
-        rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
-        rf_n_estimators = st.sidebar.slider("RF Trees", 10, 200, 50)
-        rf_max_depth = st.sidebar.slider("RF Max Depth", 2, 20, 5)
-        stop_loss = st.sidebar.number_input("Stop-Loss %", 0.1, 5.0, 0.2) / 100
-        take_profit = st.sidebar.number_input("Take-Profit %", 0.1, 5.0, 0.3) / 100
-
         df = compute_indicators(df, sma_fast, sma_slow, rsi_period)
         df_ml = prepare_ml_features(df)
         logreg, rf, acc_lr, cm_lr, acc_rf, cm_rf, df_ml = train_models(df_ml, rf_n_estimators, rf_max_depth)
@@ -186,3 +190,4 @@ else:
 
         st.subheader("📉 RSI")
         st.line_chart(df["RSI"].dropna())
+            
