@@ -151,7 +151,35 @@ feat_imp = model_rf.feature_importances_
 df_bt, total_ret, max_dd = backtest_strategy(df)
 
 # Trading simulator using Random Forest signals
-balance, total_profit, num_trades, win_rate, trades_df = trading_simulator(df.loc[X_test.index], pd.Series(y_pred_rf, index=X_test.index))
+def trading_simulator(df, signals, sl_pct=0.005, tp_pct=0.01):
+    balance = 10000.0
+    position = None
+    entry_price = 0
+    trade_log = []
+    for timestamp, signal in signals.items():
+        price = df.loc[timestamp, "close"]
+        if signal == 1 and position is None:
+            position = "long"
+            entry_price = price
+            trade_log.append({"entry_time": timestamp, "entry_price": price, "type": "buy"})
+        elif signal == 0 and position == "long":
+            exit_price = price
+            profit = exit_price - entry_price
+            balance += profit
+            trade_log[-1].update({"exit_time": timestamp, "exit_price": exit_price, "profit": profit})
+            position = None
+        elif position == "long":
+            # Check stop loss or take profit
+            if price <= entry_price * (1 - sl_pct) or price >= entry_price * (1 + tp_pct):
+                exit_price = price
+                profit = exit_price - entry_price
+                balance += profit
+                trade_log[-1].update({"exit_time": timestamp, "exit_price": exit_price, "profit": profit})
+                position = None
+    trades_df = pd.DataFrame(trade_log)
+    total_profit = trades_df["profit"].sum() if not trades_df.empty else 0
+    win_rate = (trades_df["profit"] > 0).mean() if not trades_df.empty else 0
+    return balance, total_profit, len(trades_df), win_rate, trades_df
 
 # Display metrics
 st.markdown(f"Data Source: Twelve Data (15min Intraday) for {pair}")
