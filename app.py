@@ -3,21 +3,42 @@ import requests
 import pandas as pd
 import streamlit as st
 
-API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
-symbol, target = "EUR", "USD"
-interval = "15min"
+# API keys - set these in Streamlit secrets or environment variables
+TWELVE_API_KEY = os.getenv("TWELVE_API_KEY") or st.secrets.get("TWELVE_API_KEY")
+ALPHA_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY") or st.secrets.get("ALPHAVANTAGE_API_KEY")
+
+symbol = "EUR/USD"
+twelve_interval = "15min"
+alpha_symbol_from = "EUR"
+alpha_symbol_to = "USD"
 
 @st.cache_data(ttl=600)
-def fetch_intraday_data():
+def fetch_twelve_data():
     url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=FX_INTRADAY&from_symbol={symbol}&to_symbol={target}"
-        f"&interval={interval}&outputsize=compact&apikey={API_KEY}"
+        f"https://api.twelvedata.com/time_series?"
+        f"symbol={symbol}&interval={twelve_interval}&apikey={TWELVE_API_KEY}&format=JSON&outputsize=500"
     )
     r = requests.get(url)
-    data = r.json().get(f"Time Series FX ({interval})", {})
+    data = r.json()
+    if "values" not in data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df.set_index("datetime", inplace=True)
+    df = df.sort_index()
+    df["close"] = pd.to_numeric(df["close"])
+    return df
+
+@st.cache_data(ttl=600)
+def fetch_alpha_daily_data():
+    url = (
+        f"https://www.alphavantage.co/query"
+        f"?function=FX_DAILY&from_symbol={alpha_symbol_from}&to_symbol={alpha_symbol_to}"
+        f"&outputsize=compact&apikey={ALPHA_API_KEY}"
+    )
+    r = requests.get(url)
+    data = r.json().get("Time Series FX (Daily)", {})
     if not data:
-        st.warning("⚠️ No intraday data returned. Check API key / limits.")
         return pd.DataFrame()
     df = pd.DataFrame.from_dict(data, orient="index").astype(float)
     df.index = pd.to_datetime(df.index)
@@ -42,19 +63,32 @@ def compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period):
 
     return df
 
-st.title("📈 Forex Dashboard: EUR/USD Intraday 15min + Signals")
+st.title("📈 Forex Dashboard: 15-min Intraday with Alpha Vantage Daily Fallback")
 
-if API_KEY:
-    df = fetch_intraday_data()
-    if not df.empty:
+if not (TWELVE_API_KEY and ALPHA_API_KEY):
+    st.warning("⚠️ Please set both TWELVE_API_KEY and ALPHAVANTAGE_API_KEY in secrets or env variables.")
+else:
+    df = fetch_twelve_data()
+    source_used = "Twelve Data (15min Intraday)"
+
+    if df.empty:
+        st.info("No intraday data from Twelve Data, falling back to Alpha Vantage daily.")
+        df = fetch_alpha_daily_data()
+        source_used = "Alpha Vantage Daily"
+
+    if df.empty:
+        st.error("No data available from either source.")
+    else:
+        # Sidebar sliders
         sma_fast_period = st.sidebar.slider("SMA Fast Period", 2, 20, 5)
         sma_slow_period = st.sidebar.slider("SMA Slow Period", 10, 50, 20)
         rsi_period = st.sidebar.slider("RSI Period", 5, 30, 14)
 
         df = compute_indicators(df, sma_fast_period, sma_slow_period, rsi_period)
 
-        st.subheader("Price + SMA with Signals")
+        st.subheader(f"Data Source: {source_used}")
 
+        st.subheader("Price + SMA with Signals")
         import matplotlib.pyplot as plt
 
         plt.figure(figsize=(10,5))
@@ -62,29 +96,5 @@ if API_KEY:
         plt.plot(df.index, df["SMA_fast"], label=f"SMA {sma_fast_period}")
         plt.plot(df.index, df["SMA_slow"], label=f"SMA {sma_slow_period}")
 
-        # Plot buy signals
-        buys = df[df["signal"] == 1]
-        plt.scatter(buys.index, buys["close"], marker="^", color="green", label="Buy Signal", s=100)
-
-        # Plot sell signals
-        sells = df[df["signal"] == -1]
-        plt.scatter(sells.index, sells["close"], marker="v", color="red", label="Sell Signal", s=100)
-
-        plt.legend()
-        plt.xlabel("Time")
-        plt.ylabel("Price")
-        plt.title("EUR/USD Close Price and SMA Signals")
-        plt.grid(True)
-        st.pyplot(plt)
-
-        st.subheader("RSI")
-        st.line_chart(df["RSI"])
-
-        st.subheader("Latest Data")
-        st.dataframe(df.tail(10))
-
-    else:
-        st.warning("No intraday data available.")
-else:
-    st.warning("⚠️ Please set your ALPHAVANTAGE_API_KEY in Streamlit secrets or environment variables.")
-    
+        # Plot buy
+        
