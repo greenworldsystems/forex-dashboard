@@ -26,4 +26,4 @@ def fetch_twelve_data():
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df.set_index("datetime", inplace=True)
-    df.sort_index(inplace=True)_
+    df.sort_index(inplace=True)
